@@ -1,0 +1,31 @@
+PLACEHOLDER — pytorch_model.bin
+
+Ce fichier remplace les vrais poids du modèle (environ 443 Mo pour camembert-base fine-tuné).
+
+Dans le cadre du workshop InferLoop, vous avez DEUX OPTIONS :
+
+OPTION A — Utiliser directement le modèle camembert-base depuis HuggingFace Hub :
+    from transformers import pipeline
+    classifier = pipeline("text-classification", model="camembert-base")
+    # Note : camembert-base seul n'a pas les labels MédiaLens — il faudra adapter
+
+OPTION B (recommandée) — Choisir un modèle pré-entraîné léger pour la classification zero-shot :
+    from transformers import pipeline
+    classifier = pipeline(
+        "zero-shot-classification",
+        model="facebook/bart-large-mnli"
+    )
+    labels = ["politique", "economie", "sport", "culture", "faits_divers"]
+    result = classifier("Le Premier ministre annonce une réforme.", candidate_labels=labels)
+
+OPTION C — Utiliser un modèle multilingue léger :
+    from transformers import pipeline
+    classifier = pipeline(
+        "text-classification",
+        model="lxyuan/distilbert-base-multilingual-cased-sentiments-student"
+    )
+
+La DÉCISION de votre binôme sur le modèle choisi doit être DOCUMENTÉE dans votre README
+avec les trade-offs : taille de l'image Docker / latence / qualité des prédictions.
+
+Le choix du modèle est évalué (voir barème).

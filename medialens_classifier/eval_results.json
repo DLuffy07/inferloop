@@ -1,0 +1,45 @@
+{
+  "eval_accuracy": 0.8734,
+  "eval_f1_macro": 0.8691,
+  "eval_f1_weighted": 0.8741,
+  "eval_loss": 0.3812,
+  "eval_runtime": 47.23,
+  "eval_samples_per_second": 67.4,
+  "epoch": 4.0,
+  "per_class_metrics": {
+    "politique": {
+      "precision": 0.891,
+      "recall": 0.908,
+      "f1": 0.899,
+      "support": 2156
+    },
+    "economie": {
+      "precision": 0.884,
+      "recall": 0.871,
+      "f1": 0.877,
+      "support": 1943
+    },
+    "sport": {
+      "precision": 0.921,
+      "recall": 0.934,
+      "f1": 0.927,
+      "support": 2387
+    },
+    "culture": {
+      "precision": 0.856,
+      "recall": 0.832,
+      "f1": 0.844,
+      "support": 1829
+    },
+    "faits_divers": {
+      "precision": 0.812,
+      "recall": 0.798,
+      "f1": 0.805,
+      "support": 1532
+    }
+  },
+  "confusion_matrix_note": "Principales confusions : faits_divers \u2194 politique (12%), culture \u2194 faits_divers (8%)",
+  "_eval_date": "2024-01-15",
+  "_eval_set": "test_set_2024_jan",
+  "_note": "Ces m\u00e9triques sont calcul\u00e9es sur le jeu de test interne M\u00e9diaLens. Pour valider sur articles_test.csv, voir notebook."
+}

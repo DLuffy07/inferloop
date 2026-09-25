@@ -1,0 +1,12 @@
+torch>=2.0.0
+transformers==4.36.2
+datasets>=2.14.0
+pandas
+numpy
+scikit-learn
+fastapi
+uvicorn[standard]
+prometheus-client
+pytest
+httpx
+redis

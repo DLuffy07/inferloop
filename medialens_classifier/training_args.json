@@ -1,0 +1,23 @@
+{
+  "model_name_or_path": "camembert-base",
+  "task_name": "text_classification",
+  "num_train_epochs": 4,
+  "per_device_train_batch_size": 16,
+  "per_device_eval_batch_size": 32,
+  "learning_rate": 2e-05,
+  "weight_decay": 0.01,
+  "warmup_ratio": 0.1,
+  "lr_scheduler_type": "linear",
+  "max_seq_length": 256,
+  "evaluation_strategy": "epoch",
+  "save_strategy": "best",
+  "metric_for_best_model": "f1_macro",
+  "fp16": false,
+  "dataloader_num_workers": 4,
+  "seed": 42,
+  "output_dir": "./medialens_classifier",
+  "_training_date": "2024-01-15",
+  "_dataset": "corpus_presse_fr_2021_2023",
+  "_dataset_size": "12 847 articles",
+  "_note": "Fine-tuning de camembert-base sur corpus presse interne M\u00e9diaLens. Voir notebook model_training.ipynb."
+}
