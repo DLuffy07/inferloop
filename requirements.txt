@@ -10,3 +10,4 @@ prometheus-client
 pytest
 httpx
 redis
+locust
