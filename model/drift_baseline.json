@@ -1,0 +1,14 @@
+{
+  "description": "Distribution des classes prédites sur articles_test.csv (500 articles) — référence pour la détection de drift. Régénérée par scripts/evaluate_model.py.",
+  "source": "reports/evaluation_mdeberta_baseline.csv",
+  "model": "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli",
+  "prompt_mode": "simple",
+  "n_articles": 500,
+  "shares": {
+    "politique": 0.304,
+    "economie": 0.146,
+    "sport": 0.242,
+    "culture": 0.142,
+    "faits_divers": 0.166
+  }
+}

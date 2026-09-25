@@ -1,11 +1,19 @@
 # Python
 .venv/
+venv/
 __pycache__/
 *.pyc
 .pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
 
-# Environnement
+# Environnement / secrets
 .env
+
+# Données runtime
+data/
 
 # IDE / OS
 .vscode/

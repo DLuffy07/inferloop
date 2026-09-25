@@ -1,71 +1,147 @@
+# InferLoop — stack complète : docker compose up --build
+# Toutes les valeurs ont un défaut sûr : aucun .env n'est requis pour démarrer.
+# Personnalisation : cp .env.example .env
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
 
   api:
     build:
       context: .
       dockerfile: Dockerfile
-    image: inferloop-api:1.0
-    container_name: inferloop-api
-    ports:
-      - "8000:8000"
+    image: ${API_IMAGE:-inferloop-api:local}
+    # Pas de container_name ni de port publié ici : permet `--scale api=3`.
+    # Le port 8000 est publié par docker-compose.override.yml (chargé automatiquement).
+    expose:
+      - "8000"
     environment:
+      MODEL_NAME: ${MODEL_NAME:-MoritzLaurer/mDeBERTa-v3-base-mnli-xnli}
+      PROMPT_MODE: ${PROMPT_MODE:-fr}
+      QUANTIZE: ${QUANTIZE:-0}
+      TORCH_THREADS: ${TORCH_THREADS:-0}
+      INFERENCE_TIMEOUT: ${INFERENCE_TIMEOUT:-5}
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      CACHE_TTL: 3600
+      CACHE_TTL: ${CACHE_TTL:-3600}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - hf-cache:/models          # poids HuggingFace, téléchargés une seule fois
+      - feedback-data:/data       # POST /feedback (JSONL)
     depends_on:
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=4).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 300s          # 1er démarrage : téléchargement du modèle
     restart: unless-stopped
+    logging: *default-logging
 
   redis:
-    image: redis:7-alpine
-    container_name: inferloop-redis
-    ports:
-      - "6379:6379"
+    image: redis:7.4-alpine
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru", "--save", ""]
+    expose:
+      - "6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
     restart: unless-stopped
-
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: inferloop-prometheus
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus-data:/prometheus
-    depends_on:
-      - api
-    restart: unless-stopped
+    logging: *default-logging
 
   nginx:
-    image: nginx:alpine
-    container_name: inferloop-nginx
+    image: nginx:1.27.5-alpine   # >= 1.27.3 requis pour "resolve" dans upstream
     ports:
-      - "80:80"
+      - "${NGINX_PORT:-80}:80"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
-      - api
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/nginx-health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
     restart: unless-stopped
+    logging: *default-logging
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    # Volontairement pas de condition service_healthy sur l'API :
+    # Prometheus doit tourner pour observer une API en panne.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/healthy"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+    logging: *default-logging
 
   grafana:
-    image: grafana/grafana:latest
-    container_name: inferloop-grafana
+    image: grafana/grafana:11.3.1
     ports:
-      - "3000:3000"
+      - "${GRAFANA_PORT:-3000}:3000"
     environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}   # défaut Grafana, à surcharger via .env
+      GF_AUTH_ANONYMOUS_ENABLED: "true"      # lecture seule sans login pour la démo
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/inferloop.json
+      GF_USERS_DEFAULT_THEME: dark
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
     volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     depends_on:
-      - prometheus
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
+    logging: *default-logging
+
+  # Test de charge — hors stack par défaut : docker compose --profile loadtest up locust
+  locust:
+    image: locustio/locust:2.32.5
+    profiles: ["loadtest"]
+    command: ["-f", "/mnt/locust/locustfile.py", "--host", "http://nginx:8080"]
+    ports:
+      - "${LOCUST_PORT:-8089}:8089"
+    volumes:
+      - ./loadtest:/mnt/locust
+      - ./articles_test:/mnt/articles:ro
+    environment:
+      ARTICLES_CSV: /mnt/articles/articles_test.csv
+    depends_on:
+      nginx:
+        condition: service_healthy
 
 volumes:
+  hf-cache:
+  feedback-data:
   prometheus-data:
   grafana-data:

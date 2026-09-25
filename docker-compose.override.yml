@@ -1,0 +1,7 @@
+# Chargé automatiquement par `docker compose up` : expose l'API en direct sur :8000.
+# Pour le scaling horizontal (bonus), ignorer ce fichier :
+#   docker compose -f docker-compose.yml up -d --build --scale api=3
+services:
+  api:
+    ports:
+      - "${API_PORT:-8000}:8000"

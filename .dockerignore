@@ -1,0 +1,24 @@
+# Contexte de build minimal : seul le code API + requirements sont nécessaires
+.venv/
+venv/
+.git/
+.github/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+.env
+data/
+reports/
+loadtest/
+monitoring/
+nginx/
+docs/
+tests/
+scripts/
+articles_test/
+model/medialens_classifier/
+*.ipynb
+*.md

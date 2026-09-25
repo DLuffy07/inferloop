@@ -1,0 +1,142 @@
+# Alerting unifié Grafana — provisionné au démarrage (aucune config manuelle).
+# Chaque règle : A = requête PromQL, B = réduction (last), C = seuil.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: inferloop-slo
+    folder: InferLoop Alertes
+    interval: 10s
+    rules:
+
+      # 1) Latence p99 de /infer au-dessus du SLA de 500 ms
+      - uid: inferloop-latency-p99
+        title: "Latence p99 /infer > 500 ms"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: histogram_quantile(0.99, sum by (le) (rate(inferloop_http_request_duration_seconds_bucket{path="/infer"}[1m])))
+          - refId: B
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last, settings: { mode: dropNN } }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [0.5] }
+        noDataState: OK
+        execErrState: Error
+        for: 30s
+        labels: { severity: warning, service: api }
+        annotations:
+          summary: "p99 de /infer = {{ humanizeDuration $values.B.Value }} (SLA 500 ms)"
+          runbook_url: "docs/RUNBOOK.md#latence-p99--500-ms"
+
+      # 2) Taux d'erreur (4xx + 5xx) sur /infer > 5 %
+      - uid: inferloop-error-rate
+        title: "Taux d'erreur /infer > 5 %"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: sum(rate(inferloop_http_requests_total{path="/infer",status=~"4..|5.."}[1m])) / sum(rate(inferloop_http_requests_total{path="/infer"}[1m]))
+          - refId: B
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last, settings: { mode: dropNN } }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [0.05] }
+        noDataState: OK
+        execErrState: Error
+        for: 30s
+        labels: { severity: warning, service: api }
+        annotations:
+          summary: "{{ humanizePercentage $values.B.Value }} des requêtes /infer en erreur"
+          runbook_url: "docs/RUNBOOK.md#taux-derreur--5-"
+
+      # 3) Service API down (aucun réplica scrapé avec up=1)
+      - uid: inferloop-api-down
+        title: "API InferLoop down"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 60, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: sum(up{job="inferloop-api"}) or vector(0)
+          - refId: B
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 10s
+        labels: { severity: critical, service: api }
+        annotations:
+          summary: "Aucun réplica de l'API ne répond au scraping Prometheus"
+          runbook_url: "docs/RUNBOOK.md#api-down"
+
+      # 4) Drift (bonus) : une classe dévie de plus de 20 points de la baseline
+      - uid: inferloop-drift
+        title: "Drift des prédictions > 20 points"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: |
+                max(
+                  abs(
+                    sum by (categorie) (increase(inferloop_prediction_total[10m]))
+                      / scalar(sum(increase(inferloop_prediction_total[10m])))
+                    - on (categorie) max by (categorie) (inferloop_drift_baseline_share)
+                  )
+                )
+                and on () (sum(increase(inferloop_prediction_total[10m])) > 30)
+          - refId: B
+            datasourceUid: __expr__
+            model: { refId: B, type: reduce, expression: A, reducer: last, settings: { mode: dropNN } }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [0.2] }
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels: { severity: warning, service: model }
+        annotations:
+          summary: "Écart max à la baseline = {{ humanizePercentage $values.B.Value }} (seuil 20 %)"
+          runbook_url: "docs/RUNBOOK.md#drift-des-prédictions"

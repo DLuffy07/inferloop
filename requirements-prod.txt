@@ -1,10 +1,12 @@
+# Dépendances de l'image API (runtime). Torch CPU uniquement -> image < 2 Go.
 --extra-index-url https://download.pytorch.org/whl/cpu
 
 torch==2.1.2+cpu
 transformers==4.36.2
 numpy<2
-sentencepiece
-fastapi
-uvicorn
-prometheus-client
-redis
+sentencepiece==0.2.0
+protobuf==4.25.5
+fastapi==0.115.6
+uvicorn==0.34.0
+prometheus-client==0.21.1
+redis==5.2.1
