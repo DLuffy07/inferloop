@@ -161,6 +161,9 @@ Rapports HTML : `loadtest/reports/locust_report.html` (version 3) et `loadtest/r
 ## Démo de soutenance
 
 ```bash
+# Scénario complet (~6 min) qui déclenche les 4 alertes et indique quand faire les captures Grafana
+python scripts/demo_grafana.py
+
 python scripts/demo.py smoke        # 10 articles réels -> catégorie, score, latence, HIT/MISS
 python scripts/demo.py cache        # MISS puis HIT sur le même article
 python scripts/demo.py ratelimit    # rafale sur :80 -> 429
@@ -195,6 +198,21 @@ répartition apparaît dans le panneau « Requêtes/s par réplica ». Chaque r�
 Sur une seule machine, les réplicas se partagent les mêmes cœurs : le débit total ne dépasse pas celui d'un réplica
 bien réglé. Le gain est la **disponibilité** : si un réplica crashe, les deux autres continuent de servir, là où un
 réplica seul coupe le service pendant ~8 s.
+
+Mesuré (50 utilisateurs, 2 min, 4 cœurs) :
+
+| Configuration | Nouveaux servis/s | Latence p50 (nouveaux) | Déjà vus OK | 502 / 504 |
+|---|---|---|---|---|
+| 1 réplica, 2 inférences x 2 threads | **2,43** | **2,3 s** | 100 % | 0 / 0 |
+| 3 réplicas, 1 x 1 thread chacun | 1,94 | 6,6 s | 100 % | 0 / 0 |
+
+Round-robin et découverte Prometheus fonctionnent (3 courbes dans « Requêtes/s par réplica »), 3 x 1,24 Go de RAM.
+Mais sur une seule machine, 3 réplicas mono-thread font **moins bien** qu'un réplica bien réglé : chaque inférence
+passe à ~1,4 s sur un seul cœur. Le scaling horizontal sert à ajouter des machines, pas à découper les mêmes cœurs.
+
+Premier essai à 3 réplicas : 370 × 502. nginx comptait les 503 de délestage comme des pannes (`max_fails`) et
+marquait tous les réplicas « down ». Corrigé avec `proxy_next_upstream error` : on ne bascule que si la connexion
+échoue vraiment.
 
 ## Configuration
 

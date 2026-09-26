@@ -96,7 +96,8 @@ groups:
                 - evaluator: { type: lt, params: [1] }
         noDataState: Alerting
         execErrState: Alerting
-        for: 10s
+        # 0s : un crash + restart auto dure ~7-9 s (mesuré) ; avec un délai de 10 s l'alerte ne partait jamais.
+        for: 0s
         labels: { severity: critical, service: api }
         annotations:
           summary: "Aucun réplica de l'API ne répond au scraping Prometheus"
