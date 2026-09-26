@@ -111,6 +111,11 @@ drift, liste des alertes, feedback.
 
 Procédures de réponse : [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 
+Aperçu pendant un pic de charge (`python scripts/demo_grafana.py`, phase 2) : délestage 503, p99 à 4 s, alerte
+« Latence p99 » en Firing.
+
+![Dashboard Grafana InferLoop pendant un pic de charge](docs/img/grafana-dashboard.png)
+
 ## CI/CD
 
 `.github/workflows/ci.yml` : **lint** (`ruff check .`) → **tests** (`pytest` + couverture, rapports en artefact) ∥
