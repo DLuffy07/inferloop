@@ -14,6 +14,7 @@ import logging
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,11 +40,21 @@ from api.labels import CATEGORIES, build_input, get_prompt
 # ============================================================
 
 MODEL_NAME = os.getenv("MODEL_NAME", "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli")
-PROMPT_MODE = os.getenv("PROMPT_MODE", "fr")
+PROMPT_MODE = os.getenv("PROMPT_MODE", "simple").strip()
 LOAD_MODEL = os.getenv("LOAD_MODEL", "1") == "1"
-QUANTIZE = os.getenv("QUANTIZE", "0") == "1"
+QUANTIZE = os.getenv("QUANTIZE", "0").strip() == "1"  # ⚠️ mesuré : casse mDeBERTa (voir model/README.md)
 TORCH_THREADS = int(os.getenv("TORCH_THREADS", "0"))
-INFERENCE_TIMEOUT = float(os.getenv("INFERENCE_TIMEOUT", "5"))
+INFERENCE_TIMEOUT = float(os.getenv("INFERENCE_TIMEOUT", "10"))  # filet de sécurité : la file bornée limite l'attente
+# Inférences exécutées en parallèle par process. 1 = torch utilise tous les cœurs pour une
+# seule inférence à la fois (pas de sur-souscription CPU, latence minimale par requête).
+MAX_CONCURRENT_INFERENCES = int(os.getenv("MAX_CONCURRENT_INFERENCES", "1"))
+# Requêtes autorisées à attendre derrière. Au-delà : 503 immédiat (load shedding)
+# plutôt qu'un timeout après 5-10 s qui consomme du CPU pour rien.
+# Réglé pour que l'attente max (≈ (MAX_QUEUE + 1) x 0,5 s) reste bien sous INFERENCE_TIMEOUT :
+# sinon on calcule des réponses que le client a déjà abandonnées (mesuré : 208 x 504 avec 8 / 5 s).
+MAX_QUEUE = int(os.getenv("MAX_QUEUE", "4"))
+MODEL_LOAD_RETRIES = int(os.getenv("MODEL_LOAD_RETRIES", "3"))
+MODEL_LOAD_RETRY_DELAY = float(os.getenv("MODEL_LOAD_RETRY_DELAY", "10"))
 
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
@@ -111,6 +122,12 @@ FEEDBACK_COUNT = Counter(
     "Retours humains reçus sur /feedback",
     ["accord"],
 )
+INFERENCE_QUEUE = Gauge(
+    "inferloop_inference_queue", "Inférences en cours + en attente (hors cache)"
+)
+SHED_COUNT = Counter(
+    "inferloop_shed_total", "Requêtes rejetées en 503 car la file d'inférence est pleine"
+)
 MODEL_LOADED = Gauge("inferloop_model_loaded", "1 si le modèle est chargé")
 MODEL_INFO = Gauge(
     "inferloop_model_info", "Modèle servi", ["model", "prompt_mode", "quantized"]
@@ -121,7 +138,7 @@ for _cat in CATEGORIES:
     PREDICTION_COUNT.labels(categorie=_cat)
 for _accord in ("oui", "non", "inconnu"):
     FEEDBACK_COUNT.labels(accord=_accord)
-for _reason in ("model_unavailable", "timeout", "inference"):
+for _reason in ("model_unavailable", "timeout", "inference", "overloaded"):
     ERROR_COUNT.labels(reason=_reason)
 
 
@@ -142,6 +159,10 @@ def load_drift_baseline(path: Path = DRIFT_BASELINE_PATH) -> dict[str, float]:
 
 classifier = None
 redis_client = None
+# Pool dédié au modèle : les inférences ne saturent pas le threadpool de FastAPI (utilisé
+# pour Redis), et une requête expirée encore en file est annulée avant de consommer du CPU.
+_inference_pool = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_INFERENCES, thread_name_prefix="inference")
+_inflight_inferences = 0  # modifié uniquement depuis la boucle asyncio : pas de verrou nécessaire
 _feedback_lock = threading.Lock()
 
 
@@ -169,20 +190,42 @@ def load_classifier():
 
 
 def connect_redis():
+    """Crée toujours le client : redis-py se reconnecte seul à chaque commande.
+
+    Si Redis est indisponible au démarrage, l'API tourne sans cache puis
+    le retrouve automatiquement dès qu'il revient (pas de client figé à None).
+    """
+    client = redis.Redis(
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        decode_responses=True,
+        socket_connect_timeout=1,
+        socket_timeout=1,
+        retry_on_timeout=False,
+    )
     try:
-        client = redis.Redis(
-            host=REDIS_HOST,
-            port=REDIS_PORT,
-            decode_responses=True,
-            socket_connect_timeout=1,
-            socket_timeout=1,
-        )
         client.ping()
         logger.info("Connexion Redis OK (%s:%s)", REDIS_HOST, REDIS_PORT)
-        return client
     except Exception as error:
-        logger.warning("Redis indisponible, API en mode dégradé sans cache : %s", error)
-        return None
+        logger.warning("Redis indisponible pour l'instant, cache désactivé jusqu'à son retour : %s", error)
+    return client
+
+
+async def load_classifier_with_retry():
+    """Retente le chargement (réseau/DNS instable au démarrage), puis abandonne.
+
+    En cas d'échec définitif, on lève l'exception : uvicorn s'arrête, le conteneur
+    sort et la restart policy Docker le relance. Mieux qu'une API vivante
+    mais bloquée pour toujours en 503.
+    """
+    for attempt in range(1, MODEL_LOAD_RETRIES + 1):
+        try:
+            return await run_in_threadpool(load_classifier)
+        except Exception as error:
+            logger.error("Chargement du modèle : tentative %d/%d échouée : %s", attempt, MODEL_LOAD_RETRIES, error)
+            if attempt == MODEL_LOAD_RETRIES:
+                raise
+            await asyncio.sleep(MODEL_LOAD_RETRY_DELAY * attempt)
 
 
 @asynccontextmanager
@@ -192,10 +235,7 @@ async def lifespan(_app: FastAPI):
     MODEL_INFO.labels(model=MODEL_NAME, prompt_mode=PROMPT_MODE, quantized=str(QUANTIZE)).set(1)
     redis_client = connect_redis()
     if LOAD_MODEL:
-        try:
-            classifier = await run_in_threadpool(load_classifier)
-        except Exception:
-            logger.exception("Échec du chargement du modèle")
+        classifier = await load_classifier_with_retry()
     MODEL_LOADED.set(1 if classifier is not None else 0)
     yield
 
@@ -333,6 +373,7 @@ def health():
         "redis_connected": _redis_ok(),
         "model": MODEL_NAME,
         "prompt_mode": PROMPT_MODE,
+        "quantized": QUANTIZE,
         "version": app.version,
     }
     if not loaded:
@@ -343,6 +384,7 @@ def health():
 
 @app.post("/infer", response_model=InferResponse)
 async def infer(request: InferRequest):
+    global _inflight_inferences
     REQUEST_COUNT.inc()
     start = time.perf_counter()
 
@@ -365,9 +407,23 @@ async def infer(request: InferRequest):
         }
     CACHE_MISS_COUNT.inc()
 
+    if _inflight_inferences >= MAX_CONCURRENT_INFERENCES + MAX_QUEUE:
+        SHED_COUNT.inc()
+        ERROR_COUNT.labels(reason="overloaded").inc()
+        raise HTTPException(
+            status_code=503,
+            detail="Service saturé, réessayez dans quelques secondes.",
+            headers={"Retry-After": "2"},
+        )
+
+    _inflight_inferences += 1
+    INFERENCE_QUEUE.set(_inflight_inferences)
     start_inference = time.perf_counter()
     try:
-        prediction = await asyncio.wait_for(run_in_threadpool(_predict, text), timeout=INFERENCE_TIMEOUT)
+        loop = asyncio.get_running_loop()
+        prediction = await asyncio.wait_for(
+            loop.run_in_executor(_inference_pool, _predict, text), timeout=INFERENCE_TIMEOUT
+        )
     except TimeoutError:
         ERROR_COUNT.labels(reason="timeout").inc()
         raise HTTPException(status_code=504, detail=f"Inférence > {INFERENCE_TIMEOUT}s.") from None
@@ -375,6 +431,9 @@ async def infer(request: InferRequest):
         ERROR_COUNT.labels(reason="inference").inc()
         logger.exception("Erreur lors de l'inférence")
         raise HTTPException(status_code=500, detail="Erreur lors de l'inférence.") from None
+    finally:
+        _inflight_inferences -= 1
+        INFERENCE_QUEUE.set(_inflight_inferences)
 
     INFERENCE_COUNT.inc()
     INFERENCE_LATENCY.observe(time.perf_counter() - start_inference)

@@ -71,9 +71,18 @@ grafana :3000 ──► prometheus  (datasource, dashboard et 4 alertes provisio
 
 `MoritzLaurer/mDeBERTa-v3-base-mnli-xnli` en zero-shot. Le CamemBERT fine-tuné d'Adrien est livré **sans ses
 poids**, et nous n'avons pas de corpus d'entraînement pour le reconstruire. mDeBERTa est le seul candidat multilingue
-utilisable tout de suite. Mesures sur les 500 articles de test (configuration J1) : **accuracy 0,656 · F1 macro 0,649 ·
-p99 633 ms**. Optimisations ajoutées : prompt français, batching des 5 hypothèses NLI, quantification int8 en option,
-cache. Détail des trade-offs et des chiffres : [`model/README.md`](model/README.md).
+utilisable tout de suite.
+
+Trois configurations mesurées via l'API sur les 500 articles de test (`scripts/eval_api.py`) :
+
+| Configuration | Accuracy | F1 macro | p99 |
+|---|---|---|---|
+| **`simple` (retenue)** | **0,656** | **0,649** | 707 ms |
+| `fr` (libellés descriptifs) | 0,614 | 0,582 | 762 ms |
+| `simple` + int8 | 0,154 | 0,147 | 432 ms |
+
+La quantification int8 est plus rapide mais détruit le modèle : rejetée. Le SLA p99 < 500 ms n'est pas tenu sur CPU
+pour une requête isolée. Leviers et analyse : [`model/README.md`](model/README.md).
 
 ## Docker
 
@@ -97,7 +106,7 @@ drift, liste des alertes, feedback.
 |---|---|---|
 | Latence p99 /infer > 500 ms | `histogram_quantile(0.99, …) > 0.5` | 30 s |
 | Taux d'erreur /infer > 5 % | (4xx + 5xx) / total > 0,05 | 30 s |
-| API down | `sum(up{job="inferloop-api"}) < 1` (0 si aucun réplica) | 10 s |
+| API down | `sum(up{job="inferloop-api"}) < 1` (0 si aucun réplica) | immédiat |
 | Drift > 20 points *(bonus)* | écart max entre la part d'une classe (10 min) et la baseline > 0,20, dès 30 prédictions | immédiat |
 
 Procédures de réponse : [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
@@ -128,7 +137,26 @@ docker compose --profile loadtest run --rm locust -f /mnt/locust/locustfile.py -
 
 Locust passe par un listener nginx **interne** (`:8080`, non publié sur l'hôte) : même load balancing, sans le rate
 limit par IP, qui bloquerait sinon 50 utilisateurs venant de la même IP. Trafic : 70 % d'articles nouveaux (vraie
-inférence), 30 % d'articles rejoués (cache hit).
+inférence), 30 % d'articles rejoués (cache hit). Les rejets 503 sont comptés à part (`/infer [délesté 503]`).
+
+### Résultats (50 utilisateurs, 3 min, Docker Desktop 4 cœurs CPU)
+
+La demande (~30 req/s) est ~15 fois au-dessus de la capacité d'inférence d'un CPU avec ce modèle. Le but n'est pas
+de tout servir, mais de **se dégrader proprement**. Quatre itérations, chacune corrigeant ce que la précédente a révélé :
+
+| Version | Nouveaux servis | Latence (p50 / p99) | 504 | Déjà vus OK | Problème révélé |
+|---|---|---|---|---|---|
+| 1. Threadpool FastAPI (40 threads) | 20 | ~10 s | 771 | 9 % | Sur-souscription CPU : 40 inférences à 4 threads sur 4 cœurs, le cache bloqué derrière |
+| 2. Pool dédié 1 worker + file 8, timeout 5 s | 96 (0,5/s) | — | 208 | 70 % | Attente max ≈ timeout : ~75 % du CPU sur des réponses déjà abandonnées |
+| 3. File 4, timeout 10 s, 1 x 4 threads | 319 (1,78/s) | 2,6 s / 3,1 s | **0** | **100 %** | — |
+| **4. 2 inférences x 2 threads** (retenue) | **437 (2,43/s)** | **2,3 s / 3,0 s** | **0** | **100 %** | — |
+
+Dans la version retenue, le cache est servi en 7 ms médian et les 3 272 requêtes excédentaires sont rejetées en 6 ms
+avec `Retry-After: 2`. L'API reste `healthy` du début à la fin. Sur les nouveaux articles, la latence est surtout de
+l'attente en file : une inférence seule prend ~0,5 s. Pour absorber 30 req/s, il faudrait ~12 fois plus de calcul
+(GPU, ONNX Runtime, modèle distillé) : voir [`model/README.md`](model/README.md).
+
+Rapports HTML : `loadtest/reports/locust_report.html` (version 3) et `loadtest/reports/locust_report_2x2.html` (version 4).
 
 ## Démo de soutenance
 
@@ -152,11 +180,21 @@ docker compose exec api python -c "import os,signal; os.kill(1, signal.SIGTERM)"
 ### Scaling horizontal (bonus)
 
 ```bash
-docker compose -f docker-compose.yml up -d --build --scale api=3
+# 3 réplicas sur 4 cœurs : 1 inférence x 1 thread chacun (sinon ils se disputent le CPU)
+printf "MAX_CONCURRENT_INFERENCES=1\nTORCH_THREADS=1\n" > .env
+docker compose -f docker-compose.yml up -d --scale api=3
+# Toujours passer -f docker-compose.yml (sinon Compose revient à 1 réplica) et --no-deps
+docker compose -f docker-compose.yml --profile loadtest run --rm --no-deps locust \
+  -f /mnt/locust/locustfile.py --host http://nginx:8080 --headless -u 50 -r 10 -t 2m --only-summary
 ```
 Sans `docker-compose.override.yml`, l'API n'a plus de port publié et peut donc être répliquée. nginx
 (`server api:8000 resolve`) fait du round-robin sur les 3 réplicas, et Prometheus les découvre par DNS. La
-répartition apparaît dans le panneau « Requêtes/s par réplica ».
+répartition apparaît dans le panneau « Requêtes/s par réplica ». Chaque réplica charge son propre modèle en mémoire
+(~1,5 Go chacun) : prévoir au moins 6 Go de RAM pour Docker.
+
+Sur une seule machine, les réplicas se partagent les mêmes cœurs : le débit total ne dépasse pas celui d'un réplica
+bien réglé. Le gain est la **disponibilité** : si un réplica crashe, les deux autres continuent de servir, là où un
+réplica seul coupe le service pendant ~8 s.
 
 ## Configuration
 
@@ -166,8 +204,8 @@ surcharger via `GRAFANA_ADMIN_PASSWORD`.
 
 ## Limites connues & pistes
 
-- Qualité zero-shot (~66 % d'accuracy mesurée) inférieure au CamemBERT fine-tuné d'Adrien (87 % annoncé). La vraie
+- Qualité zero-shot (65,6 % d'accuracy mesurée) inférieure au CamemBERT fine-tuné d'Adrien (87 % annoncé). La vraie
   suite serait de fine-tuner un `distilcamembert` sur les retours `/feedback` et un corpus annoté.
-- Latence CPU proche du SLA : `QUANTIZE=1` et `--scale` sont les leviers immédiats. À terme : export ONNX, GPU.
+- p99 à 707 ms sur CPU, au-dessus du SLA de 500 ms. La quantification int8 a été testée et rejetée (accuracy 0,15). Leviers : cache, CPU, `--scale`, puis export ONNX Runtime ou GPU.
 - Mise à jour du modèle sans interruption : il faudrait un déploiement blue/green (deux services api derrière nginx),
   ou passer sur Kubernetes (rolling update, HPA).

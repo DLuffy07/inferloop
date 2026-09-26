@@ -37,7 +37,7 @@ groups:
         for: 30s
         labels: { severity: warning, service: api }
         annotations:
-          summary: "p99 de /infer = {{ humanizeDuration $values.B.Value }} (SLA 500 ms)"
+          summary: "p99 de /infer = {{ $values.B }} s (SLA 0.5 s)"
           runbook_url: "docs/RUNBOOK.md#latence-p99--500-ms"
 
       # 2) Taux d'erreur (4xx + 5xx) sur /infer > 5 %
@@ -68,7 +68,7 @@ groups:
         for: 30s
         labels: { severity: warning, service: api }
         annotations:
-          summary: "{{ humanizePercentage $values.B.Value }} des requêtes /infer en erreur"
+          summary: "Ratio d'erreurs /infer = {{ $values.B }} (seuil 0.05)"
           runbook_url: "docs/RUNBOOK.md#taux-derreur--5-"
 
       # 3) Service API down (aucun réplica scrapé avec up=1)
@@ -138,5 +138,5 @@ groups:
         for: 0s
         labels: { severity: warning, service: model }
         annotations:
-          summary: "Écart max à la baseline = {{ humanizePercentage $values.B.Value }} (seuil 20 %)"
+          summary: "Écart max à la baseline = {{ $values.B }} (seuil 0.20)"
           runbook_url: "docs/RUNBOOK.md#drift-des-prédictions"

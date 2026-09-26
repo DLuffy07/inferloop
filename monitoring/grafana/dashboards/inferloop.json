@@ -853,7 +853,7 @@
       "description": "",
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 8,
         "x": 0,
         "y": 24
       },
@@ -921,8 +921,8 @@
       "description": "",
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
+        "w": 8,
+        "x": 8,
         "y": 24
       },
       "targets": [
@@ -967,9 +967,82 @@
       }
     },
     {
+      "type": "timeseries",
+      "title": "File d'inférence & délestage (503)",
+      "id": 18,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Au-delà de MAX_CONCURRENT_INFERENCES + MAX_QUEUE, l'API rejette immédiatement en 503 au lieu de laisser les requêtes expirer",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 24
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(inferloop_inference_queue)",
+          "legendFormat": "inférences en cours + en attente",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(inferloop_shed_total[1m]))",
+          "legendFormat": "rejets 503 /s",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(inferloop_inference_total[1m]))",
+          "legendFormat": "inférences /s (capacité servie)",
+          "refId": "C"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
       "type": "row",
       "title": "Drift des prédictions",
-      "id": 18,
+      "id": 19,
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -982,7 +1055,7 @@
     {
       "type": "timeseries",
       "title": "Part de chaque classe prédite (fenêtre $drift_window)",
-      "id": 19,
+      "id": 20,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1038,7 +1111,7 @@
     {
       "type": "barchart",
       "title": "Actuel vs baseline",
-      "id": 20,
+      "id": 21,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1117,7 +1190,7 @@
     {
       "type": "timeseries",
       "title": "Écart max à la baseline",
-      "id": 21,
+      "id": 22,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1189,7 +1262,7 @@
     {
       "type": "row",
       "title": "Alertes & feedback",
-      "id": 22,
+      "id": 23,
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -1202,7 +1275,7 @@
     {
       "type": "alertlist",
       "title": "Alertes InferLoop",
-      "id": 23,
+      "id": 24,
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -1229,7 +1302,7 @@
     {
       "type": "timeseries",
       "title": "Feedback humain (bonus /feedback)",
-      "id": 24,
+      "id": 25,
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"

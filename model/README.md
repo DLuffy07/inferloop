@@ -22,42 +22,60 @@ disponible immédiatement, multilingue et dont les catégories se changent sans 
 
 ## Mesures sur `articles_test.csv` (500 articles, 100 par classe)
 
-Configuration J1 (`PROMPT_MODE=simple`, template anglais par défaut, 5 forwards séquentiels) — `reports/evaluation_mdeberta_baseline.csv` :
+Mesuré **via l'API en service** (`scripts/eval_api.py`, CPU Docker Desktop, 1 requête à la fois).
+Latence = bout en bout côté API, sur les ~190 inférences réelles (les autres articles sont des
+doublons du CSV servis par le cache Redis en < 1 ms).
 
-| Métrique | Valeur |
-|---|---|
-| Accuracy | **0,656** |
-| F1 macro | **0,649** |
-| Latence p50 / p95 / p99 | 533 / 595 / 633 ms |
+| Configuration | Accuracy | F1 macro | p50 | p95 | p99 | Verdict |
+|---|---|---|---|---|---|---|
+| **`PROMPT_MODE=simple`** (template par défaut, libellés courts) | **0,656** | **0,649** | 456 ms | 590 ms | 707 ms | ✅ **Retenu** |
+| `PROMPT_MODE=fr` (template français, libellés descriptifs) | 0,614 | 0,582 | 507 ms | 659 ms | 762 ms | ❌ Biais massif vers « economie » (49 % des prédictions) |
+| `simple` + `QUANTIZE=1` (int8 dynamique) | 0,154 | 0,147 | 302 ms | 378 ms | 432 ms | ❌ Plus rapide (−34 %) mais **modèle détruit** (niveau hasard) |
+
+Rapports détaillés : `reports/eval_api_simple.md`, `reports/eval_api_fr.md`, `reports/eval_api_simple_q8.md`.
+
+### Détail de la configuration retenue (`simple`)
 
 | Classe | Précision | Rappel | F1 |
 |---|---|---|---|
 | sport | 0,83 | 1,00 | 0,90 |
-| culture | 0,85 | 0,60 | 0,70 |
+| culture | 0,83 | 0,60 | 0,70 |
 | politique | 0,49 | 0,74 | 0,59 |
 | faits_divers | 0,64 | 0,53 | 0,58 |
 | economie | 0,56 | 0,41 | 0,47 |
 
-Principales confusions : économie → politique, faits divers → politique (affaires judiciaires), déjà signalées par
-Adrien dans sa note.
+Principale confusion : économie → politique (41 articles sur 100), puis faits divers → politique (affaires
+judiciaires), deux limites déjà signalées par Adrien.
 
-## Optimisations appliquées dans l'API
+### Ce que les expériences ont appris
 
-| Levier | Effet attendu | Réglage |
-|---|---|---|
-| Template français + libellés descriptifs (« économie, finance et entreprises »…) | Lever les confusions politique/économie/faits divers | `PROMPT_MODE=fr` (défaut) |
-| Les 5 paires NLI dans **un seul forward** (`batch_size=5`) | Latence nettement plus basse qu'avec 5 passages séquentiels | toujours actif |
-| Quantification dynamique int8 des couches `Linear` | Environ 2x plus rapide sur CPU, légère perte de qualité | `QUANTIZE=1` |
-| Cache Redis (TTL 1 h) | ~1 ms sur un article déjà vu | `CACHE_TTL` |
-| Scaling horizontal derrière nginx | Débit multiplié par le nombre de réplicas | `--scale api=3` |
+- **Prompt `fr` :** des libellés plus descriptifs n'aident pas un modèle NLI. « économie, finance et entreprises »
+  devient un label fourre-tout qui absorbe 90 % des faits divers. Des libellés courts restent plus discriminants.
+- **Quantification int8 :** `torch.quantization.quantize_dynamic` sur toutes les couches `Linear` casse mDeBERTa (la
+  tête de classification NLI et l'attention désentrelacée de DeBERTa sont sensibles à la précision). Le gain de
+  latence ne vaut rien sans la qualité. D'où la règle : toute optimisation se valide sur le jeu de test **avant**
+  d'être déployée. L'option reste dans le code, désactivée, pour documenter l'expérience.
+- **Batching** des 5 hypothèses NLI dans un seul forward (`batch_size=5`) : actif dans toutes les mesures ci-dessus.
 
-> Les gains de `PROMPT_MODE=fr`, du batching et de `QUANTIZE=1` n'ont pas encore été chiffrés. Pour les mesurer :
-> `pip install -r requirements-eval.txt && python scripts/evaluate_model.py` (compare `simple` et `fr`), puis
-> `python scripts/evaluate_model.py --modes fr --quantize`. Les résultats vont dans `reports/model_evaluation*.md`.
-> Si `fr` est moins bon que `simple`, mettre `PROMPT_MODE=simple` dans `.env`.
+### SLA de latence (p99 < 500 ms) : non tenu sur CPU pour une requête isolée
+
+p99 = 707 ms sur CPU Docker Desktop. Leviers, par ordre d'effort :
+
+1. **Cache Redis :** sur ce jeu, 60 % des requêtes sont des doublons servis en < 1 ms. En conditions réelles, un
+   même article est souvent soumis plusieurs fois (reprises, agrégateurs).
+2. **Plus de CPU** alloués à Docker, et `TORCH_THREADS` ajusté : la latence d'un forward baisse presque
+   linéairement avec les cœurs disponibles.
+3. **Parallélisme adapté aux cœurs** : 2 inférences x 2 threads au lieu de 1 x 4 donne +37 % de débit mesuré
+   (2,43 contre 1,78 inf/s sur 4 cœurs), car torch ne passe pas linéairement à l'échelle sur de petites matrices.
+   Scaler les réplicas (`--scale api=3`) n'aide que si on ajoute des machines ou des cœurs.
+4. **Export ONNX Runtime** (optimum) : typiquement ~2x sur CPU **sans** perte de qualité, contrairement à la
+   quantification naïve. Prochaine étape recommandée.
+5. **Modèle distillé fine-tuné** (distilcamembert sur les retours `/feedback`) : ~4x plus rapide et meilleure
+   qualité, mais nécessite des données annotées.
+6. **GPU** : ~18 ms par article d'après Adrien.
 
 ## Baseline de drift
 
 `model/drift_baseline.json` contient la répartition des classes **prédites** sur les 500 articles de test. L'API
 l'expose (`inferloop_drift_baseline_share`) et Grafana alerte quand une classe s'en écarte de plus de 20 points sur
-10 min. À régénérer quand le modèle ou le prompt change : `python scripts/evaluate_model.py --modes fr --write-baseline`.
+10 min. À régénérer quand le modèle ou le prompt change : `python scripts/evaluate_model.py --modes simple --write-baseline`.

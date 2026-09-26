@@ -39,19 +39,26 @@ ARTICLES = load_articles()
 HOT_SET = ARTICLES[:20]  # petit ensemble rejoué pour générer des cache hits
 
 
+def post_infer(client, payload: dict, name: str):
+    """Les rejets 503 (délestage) sont comptés à part : les stats « [nouveau] » / « [déjà vu] »
+    ne mélangent pas latence des vraies réponses et rejets immédiats."""
+    with client.post("/infer", json=payload, name=name, catch_response=True) as r:
+        if r.status_code == 503:
+            r.request_meta["name"] = "/infer [délesté 503]"
+            r.failure("délesté (file pleine)")
+        elif r.status_code != 200:
+            r.failure(f"HTTP {r.status_code}")
+
+
 class InferLoopUser(HttpUser):
     wait_time = between(1, 2)
 
     @task(7)
     def infer_new_article(self):
         titre, texte = random.choice(ARTICLES)
-        self.client.post(
-            "/infer",
-            json={"titre": titre, "texte": f"{texte} (réf. {uuid.uuid4().hex[:8]})"},
-            name="/infer [nouveau]",
-        )
+        post_infer(self.client, {"titre": titre, "texte": f"{texte} (réf. {uuid.uuid4().hex[:8]})"}, "/infer [nouveau]")
 
     @task(3)
     def infer_known_article(self):
         titre, texte = random.choice(HOT_SET)
-        self.client.post("/infer", json={"titre": titre, "texte": texte}, name="/infer [déjà vu]")
+        post_infer(self.client, {"titre": titre, "texte": texte}, "/infer [déjà vu]")

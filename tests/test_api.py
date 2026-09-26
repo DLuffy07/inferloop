@@ -1,5 +1,6 @@
 """Tests unitaires de l'API — le modèle et Redis sont mockés (pas de torch requis)."""
 
+import asyncio
 import json
 import time
 from unittest.mock import MagicMock
@@ -268,3 +269,61 @@ def test_build_input():
     assert build_input("corps") == "corps"
     assert build_input("", "titre seul") == "titre seul"
     assert build_input(None, None) == ""
+
+
+# ------------------------------------------------------------------ démarrage
+
+def test_connect_redis_returns_client_even_when_down(monkeypatch):
+    monkeypatch.setattr(main, "REDIS_HOST", "hote-inexistant.invalid")
+    client = main.connect_redis()
+    assert client is not None  # pas figé à None : se reconnectera quand Redis reviendra
+
+
+def test_model_load_retries_then_succeeds(monkeypatch):
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) < 2:
+            raise OSError("DNS temporairement indisponible")
+        return "modele"
+
+    monkeypatch.setattr(main, "load_classifier", flaky)
+    monkeypatch.setattr(main, "MODEL_LOAD_RETRY_DELAY", 0)
+    assert asyncio.run(main.load_classifier_with_retry()) == "modele"
+    assert len(calls) == 2
+
+
+def test_model_load_gives_up_and_raises(monkeypatch):
+    def always_fail():
+        raise OSError("hors ligne")
+
+    monkeypatch.setattr(main, "load_classifier", always_fail)
+    monkeypatch.setattr(main, "MODEL_LOAD_RETRY_DELAY", 0)
+    with pytest.raises(OSError):
+        asyncio.run(main.load_classifier_with_retry())
+
+
+# ------------------------------------------------------------------ charge
+
+def test_overload_sheds_with_503(model, no_cache, monkeypatch):
+    monkeypatch.setattr(main, "_inflight_inferences", main.MAX_CONCURRENT_INFERENCES + main.MAX_QUEUE)
+    r = client.post("/infer", json={"texte": "Article pendant un pic de charge"})
+    assert r.status_code == 503
+    assert r.headers["retry-after"] == "2"
+    assert model.call_count == 0  # rejeté avant de toucher au modèle
+
+
+def test_cache_hit_still_served_when_overloaded(model, cache, monkeypatch):
+    client.post("/infer", json={"texte": "Article déjà en cache"})
+    monkeypatch.setattr(main, "_inflight_inferences", main.MAX_CONCURRENT_INFERENCES + main.MAX_QUEUE)
+    r = client.post("/infer", json={"texte": "Article déjà en cache"})
+    assert r.status_code == 200
+    assert r.json()["cache"] == "HIT"
+
+
+def test_inflight_counter_back_to_zero(model, no_cache):
+    client.post("/infer", json={"texte": "a"})
+    model.side_effect = RuntimeError("boom")
+    client.post("/infer", json={"texte": "b"})
+    assert main._inflight_inferences == 0

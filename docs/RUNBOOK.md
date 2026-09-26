@@ -25,9 +25,17 @@ curl -s localhost:9090/api/v1/targets | grep health  # scraping Prometheus
 ### Latence p99 > 500 ms
 1. Dashboard → « Latence /infer » vs « Latence modèle seul » : si les deux montent, le CPU est saturé.
 2. `docker stats` : CPU de `api` à 100 % ?
-3. Remèdes, du plus rapide au plus lourd : `QUANTIZE=1` dans `.env` puis `docker compose up -d api` ·
+3. Remèdes, du plus rapide au plus lourd : plus de CPU pour Docker ·
    `docker compose -f docker-compose.yml up -d --scale api=3` · limiter `TORCH_THREADS` (1 à 2 par réplica) quand il y a
    plusieurs réplicas, pour éviter qu'ils se disputent les cœurs.
+   ⚠️ Ne pas activer `QUANTIZE=1` : mesuré, il fait tomber l'accuracy à 0,15.
+
+### Saturation : pic de 503 « Service saturé »
+Le panneau « File d'inférence & délestage » montre la file pleine et des rejets 503/s : la demande dépasse la
+capacité (2,4 inférences/s mesurées sur 4 cœurs). C'est voulu : rejeter tout de suite (avec `Retry-After`) vaut
+mieux que laisser 50 requêtes expirer après 10 s en brûlant du CPU. Les articles déjà en cache restent servis.
+Remède : plus de cœurs (garder `MAX_CONCURRENT_INFERENCES x TORCH_THREADS` = nb de cœurs), GPU ou ONNX Runtime.
+`--scale api=N` sur la même machine ne crée pas de CPU : il répartit les mêmes cœurs.
 
 ### Taux d'erreur > 5 %
 1. Panneau « Requêtes/s par code HTTP » : 4xx (payloads invalides côté client) ou 5xx (API) ?
